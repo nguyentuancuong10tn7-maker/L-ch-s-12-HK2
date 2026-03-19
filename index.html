@@ -280,8 +280,57 @@ button:hover {
   z-index: 9998;
 }
 
+/* Bong bóng nghe lỏm */
+#whisperBubble {
+  position: fixed;
+  bottom: 110px;
+  left: 15px;
+  background: rgba(30,30,30,0.92);
+  color: white;
+  padding: 10px 15px;
+  border-radius: 15px 15px 15px 0;
+  font-size: 13px;
+  max-width: 200px;
+  z-index: 998;
+  display: none;
+  animation: popIn 0.3s ease;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+
+@keyframes popIn {
+  from { opacity:0; transform:scale(0.8) translateY(10px); }
+  to { opacity:1; transform:scale(1) translateY(0); }
+}
+
+/* Streak */
+#streakBox {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255,100,0,0.92);
+  color: white;
+  padding: 5px 18px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: bold;
+  z-index: 1000;
+  display: none;
+}
+
+/* Timer tổng */
+#totalTimer {
+  font-size: 12px;
+  color: rgba(255,255,255,0.6);
+  margin-top: 2px;
+  text-align: center;
+}
+
+@keyframes confettiFall {
+  to { transform: translateY(110vh) rotate(720deg); opacity:0; }
+}
+
 </style>
-</head>
 
 <body>
 
@@ -295,6 +344,12 @@ button:hover {
   <div id="msgText"></div>
   <button onclick="closeMsg()">OK</button>
 </div>
+
+<!-- Bong bóng nghe lỏm -->
+<div id="whisperBubble"></div>
+
+<!-- Streak -->
+<div id="streakBox"></div>
 
 <!-- Nút điều khiển -->
 <div id="controls">
@@ -342,6 +397,7 @@ button:hover {
 <!-- Màn hình quiz -->
 <div id="quiz" style="display:none">
   <div id="timer">20</div>
+  <div id="totalTimer">⏱️ 0:00</div>
   <h2 id="question"></h2>
   <div id="options"></div>
 </div>
@@ -443,6 +499,18 @@ let timer
 let fear = 50
 let watch = 0
 
+// ===== TÍNH NĂNG MỚI =====
+let streak = 0
+let totalSeconds = 0
+let totalTimerInterval
+let fastAnswerCount = 0
+let hardModeForced = 0
+let neighborTrust = true // đứa kế bên có tin mình không
+let answerStartTime = 0
+let nextWhisper = Math.floor(Math.random()*3)+3
+let nextNeighborAsk = Math.floor(Math.random()*3)+4
+let hardQuestions = [] // câu hỏi siêu khó để dồn ép
+
 // ===== ĐỘ KHÓ =====
 let difficulty = 'medium'
 let diffSettings = {
@@ -536,15 +604,24 @@ function startGame(){
   let cfg = diffSettings[difficulty]
   time = cfg.time
 
+  // Tách câu siêu khó ra riêng
+  hardQuestions = questions.filter(q => q.q.startsWith("⚠️"))
   questions.sort(() => Math.random() - 0.5)
+
   document.getElementById("start").style.display = "none"
   document.getElementById("quiz").style.display = "block"
   document.getElementById("statusBars").style.cssText = "display:flex; flex-direction:column;"
 
-  // Try Hard: gian lận 100% bị bắt
-  if(difficulty === 'hard'){
-    watch = 0
-  }
+  if(difficulty === 'hard') watch = 0
+
+  // Bắt đầu đồng hồ tổng
+  totalSeconds = 0
+  totalTimerInterval = setInterval(() => {
+    totalSeconds++
+    let m = Math.floor(totalSeconds/60)
+    let s = totalSeconds % 60
+    document.getElementById("totalTimer").innerText = `⏱️ ${m}:${s<10?'0'+s:s}`
+  }, 1000)
 
   updateBars()
   loadQuestion()
@@ -553,21 +630,159 @@ function startGame(){
 function loadQuestion(){
   let cfg = diffSettings[difficulty]
   time = cfg.time
+  answerStartTime = Date.now()
 
-  let q = questions[current]
+  // Anti học vẹt: nếu trả lời nhanh 10 câu liên tiếp → dồn câu khó
+  let q
+  if(hardModeForced > 0 && hardQuestions.length > 0){
+    q = hardQuestions[Math.floor(Math.random() * hardQuestions.length)]
+    hardModeForced--
+  } else {
+    q = questions[current]
+  }
+
   let answers = [...q.a]
   answers.sort(() => Math.random() - 0.5)
 
   let options = ""
   answers.forEach(opt => {
     let isCorrect = (opt === q.a[q.c])
-    options += `<div class="option" onclick="answer(${isCorrect})">${opt}</div>`
+    options += `<div class="option" onclick="answer(${isCorrect}, '${q.a[q.c]}')">${opt}</div>`
   })
 
   document.getElementById("question").innerText = q.q
   document.getElementById("options").innerHTML = options
+
+  // Nghe lỏm random mỗi 3-5 câu
+  nextWhisper--
+  if(nextWhisper <= 0){
+    nextWhisper = Math.floor(Math.random()*3)+3
+    setTimeout(() => showWhisper(q), 1500)
+  }
+
+  // Đứa kế bên hỏi mình random mỗi 4-6 câu
+  nextNeighborAsk--
+  if(nextNeighborAsk <= 0){
+    nextNeighborAsk = Math.floor(Math.random()*3)+4
+    setTimeout(() => neighborAsksMe(q), 800)
+  }
+
   startTimer()
 }
+
+// ===== NGHE LỎM =====
+let whisperMsgs = [
+  "câu này là",
+  "tao chắc chắn là",
+  "mày chọn đi, là",
+  "tao vừa tra ra rồi, là",
+  "bàn trên nói là",
+  "đứa giỏi nhất lớp chọn",
+]
+
+function showWhisper(q){
+  let isCorrect = Math.random() < 0.1 // 10% đúng
+  let ans
+  if(isCorrect){
+    ans = q.a[q.c]
+  } else {
+    let wrongArr = q.a.filter((_, i) => i !== q.c)
+    ans = wrongArr[Math.floor(Math.random()*wrongArr.length)]
+  }
+
+  let msg = whisperMsgs[Math.floor(Math.random()*whisperMsgs.length)]
+  let names = ["Đứa bàn bên", "Thằng sau lưng", "Con ngồi cạnh", "Mấy đứa bàn trên"]
+  let name = names[Math.floor(Math.random()*names.length)]
+
+  let bubble = document.getElementById("whisperBubble")
+  bubble.innerHTML = `🗣️ <b>${name}:</b><br>"${msg} <b>${ans}</b>..."`
+  bubble.style.display = "block"
+
+  setTimeout(() => { bubble.style.display = "none" }, 5000)
+}
+
+// ===== ĐỨA KẾ BÊN HỎI MÌNH =====
+function neighborAsksMe(q){
+  // Hỏi mình 1 câu ngẫu nhiên từ bộ câu hỏi
+  let askQ = questions[Math.floor(Math.random()*questions.length)]
+  showMsg(
+    `🧑‍🤝‍🧑 Đứa kế bên hỏi bạn:\n\n"${askQ.q}\n\nMày biết không?"\n\nBạn trả lời gì?`,
+    null,
+    [askQ.a[askQ.c], askQ.a.find((_, i) => i !== askQ.c)],
+    askQ.a[askQ.c]
+  )
+}
+
+function answerNeighbor(chosen, correct){
+  closeMsg()
+  if(chosen === correct){
+    neighborTrust = true
+    changeWatch(-10)
+    showToast("🧑‍🤝‍🧑 Bạn trả lời đúng! Đứa kế bên tin tưởng bạn hơn!\n-10 độ để ý 👀", "#4CAF50")
+  } else {
+    neighborTrust = false
+    changeWatch(+5)
+    showToast("🧑‍🤝‍🧑 Bạn trả lời sai! Đứa kế bên không tin bạn nữa!\n+5 độ để ý 👀", "#cc0000")
+  }
+}
+
+// ===== STREAK =====
+function updateStreak(correct){
+  if(correct){
+    streak++
+    if(streak >= 5){
+      document.getElementById("streakBox").style.display = "block"
+      document.getElementById("streakBox").innerText = `⚡ ${streak} câu liên tiếp! Bất khả chiến bại!`
+    } else if(streak >= 3){
+      document.getElementById("streakBox").style.display = "block"
+      document.getElementById("streakBox").innerText = `🔥 ${streak} câu liên tiếp! Đang nóng!`
+    }
+  } else {
+    streak = 0
+    document.getElementById("streakBox").style.display = "none"
+  }
+}
+
+// ===== TOAST THÔNG BÁO NHỎ =====
+function showToast(text, color){
+  let toast = document.createElement("div")
+  toast.innerText = text
+  toast.style.cssText = `
+    position:fixed; top:20px; left:50%;
+    transform:translateX(-50%);
+    background:${color || '#333'}; color:white;
+    padding:10px 20px; border-radius:20px;
+    font-size:15px; font-weight:bold;
+    z-index:9999; animation: fadeOut 2s forwards;
+    text-align:center; max-width:80%;
+  `
+  document.body.appendChild(toast)
+  setTimeout(() => toast.remove(), 2000)
+}
+
+// ===== CONFETTI =====
+function showConfetti(){
+  let colors = ["#FFD700","#cc0000","#4CAF50","#2196F3","#ff69b4","#ff9900"]
+  for(let i=0; i<80; i++){
+    let c = document.createElement("div")
+    c.style.cssText = `
+      position:fixed;
+      left:${Math.random()*100}vw;
+      top:-10px;
+      width:${Math.random()*10+5}px;
+      height:${Math.random()*10+5}px;
+      background:${colors[Math.floor(Math.random()*colors.length)]};
+      border-radius:${Math.random()>0.5?"50%":"0"};
+      z-index:9999;
+      animation: confettiFall ${Math.random()*2+2}s linear forwards;
+      opacity:${Math.random()*0.7+0.3};
+    `
+    document.body.appendChild(c)
+    setTimeout(() => c.remove(), 4000)
+  }
+}
+
+
 
 function startTimer(){
   clearInterval(timer)
@@ -583,32 +798,33 @@ function startTimer(){
   }, 1000)
 }
 
-function answer(correct){
+function answer(correct, correctAns){
   let cfg = diffSettings[difficulty]
+  let elapsed = (Date.now() - answerStartTime) / 1000
+
+  // Anti học vẹt: trả lời dưới 3s
+  if(elapsed < 3){
+    fastAnswerCount++
+    if(fastAnswerCount >= 10){
+      fastAnswerCount = 0
+      hardModeForced = 5
+      showToast("Bạn đang trả lời rất nhanh!\nHãy dành thêm thời gian suy nghĩ nhé 🤔", "#e67e22")
+    }
+  } else {
+    fastAnswerCount = 0
+  }
+
+  updateStreak(correct)
 
   if(correct){
     score++
     changeFear(-10)
     changeWatch(-5)
 
-    // Thưởng thời gian theo độ khó
     time = Math.min(time + cfg.bonusTime, cfg.time)
     document.getElementById("timer").innerText = time
 
-    // Hiện thông báo
-    let bonus = document.createElement("div")
-    bonus.innerText = "+" + cfg.bonusTime + " giây! ⏰"
-    bonus.style.cssText = `
-      position:fixed; top:20px; left:50%;
-      transform:translateX(-50%);
-      background:#4CAF50; color:white;
-      padding:10px 20px; border-radius:20px;
-      font-size:20px; font-weight:bold;
-      z-index:9999; animation: fadeOut 1.5s forwards;
-    `
-    document.body.appendChild(bonus)
-    setTimeout(() => bonus.remove(), 1500)
-
+    showToast("+" + cfg.bonusTime + " giây! ⏰", "#4CAF50")
     nextQuestion()
 
   } else {
@@ -616,7 +832,6 @@ function answer(correct){
     changeFear(+cfg.fearPlus)
     changeWatch(+cfg.watchPlus)
 
-    // Try Hard: sai 1 lần thua luôn
     if(cfg.oneStrike){
       let opts = document.querySelectorAll(".option")
       opts.forEach(opt => {
@@ -630,11 +845,9 @@ function answer(correct){
       return
     }
 
-    // Trừ thời gian theo độ khó
     time = Math.max(time - cfg.penaltyTime, 5)
     document.getElementById("timer").innerText = time
 
-    // Tô xanh đáp án đúng
     let opts = document.querySelectorAll(".option")
     opts.forEach(opt => {
       if(opt.onclick.toString().includes("true")){ opt.style.background = "#4CAF50"; opt.style.color = "white" }
@@ -672,24 +885,55 @@ function gameOver(){
 
 function endGame(){
   clearInterval(timer)
+  clearInterval(totalTimerInterval)
   document.getElementById("quiz").style.display = "none"
   document.getElementById("statusBars").style.display = "none"
+  document.getElementById("streakBox").style.display = "none"
+  document.getElementById("whisperBubble").style.display = "none"
   document.getElementById("resultScreen").style.display = "block"
+
+  showConfetti()
 
   let name = document.getElementById("player") ? document.getElementById("player").value || "Bạn" : "Bạn"
   let pct = Math.round(score / questions.length * 100)
+  let m = Math.floor(totalSeconds/60)
+  let s = totalSeconds % 60
+  let timeStr = `${m}:${s<10?'0'+s:s}`
 
   document.getElementById("resultTitle").innerText =
     pct >= 80 ? "🎉 Xuất sắc!" : pct >= 50 ? "👍 Khá tốt!" : "😅 Cố gắng hơn nhé!"
   let diffLabel = { easy: "😊 Dễ", medium: "😐 Trung bình", hard: "💀 Try Hard" }
-  document.getElementById("result").innerText =
-    `${name} đúng ${score}/${questions.length} câu (${pct}%) | Sai ${wrong} lần | ${diffLabel[difficulty]}`
+  document.getElementById("result").innerHTML =
+    `${name} đúng <b>${score}/${questions.length}</b> câu (${pct}%)<br>
+     Sai ${wrong} lần | ${diffLabel[difficulty]}<br>
+     ⏱️ Thời gian: <b>${timeStr}</b>`
 }
 
 // ===== POPUP THÔNG BÁO =====
-function showMsg(text, callback){
+function showMsg(text, callback, choices, correctChoice){
   document.getElementById("msgText").innerHTML = text.replace(/\n/g, "<br>")
-  document.getElementById("msgBox").style.display = "block"
+
+  let box = document.getElementById("msgBox")
+  // Xóa nút cũ
+  box.querySelectorAll(".neighborBtn").forEach(b => b.remove())
+
+  if(choices && choices.length > 0){
+    // Hiện nút chọn đáp án cho đứa kế bên hỏi
+    choices.forEach(ch => {
+      let btn = document.createElement("button")
+      btn.className = "neighborBtn"
+      btn.innerText = ch
+      btn.style.cssText = "margin:5px; padding:8px 14px; border-radius:8px; background:#555; color:white; border:none; cursor:pointer; font-size:13px;"
+      btn.onclick = () => answerNeighbor(ch, correctChoice)
+      box.appendChild(btn)
+    })
+    // Ẩn nút OK
+    box.querySelector("button:not(.neighborBtn)").style.display = "none"
+  } else {
+    box.querySelector("button:not(.neighborBtn)").style.display = "inline-block"
+  }
+
+  box.style.display = "block"
   document.getElementById("msgOverlay").style.display = "block"
   window._msgCallback = callback || null
 }
@@ -795,14 +1039,17 @@ function askNeighbor(){
   let rand = Math.random()
   let correct = questions[current].c
 
-  if(rand < 0.4){
+  // Nếu đứa kế bên không tin mình → 50% bị sai
+  let correctChance = neighborTrust ? 0.4 : 0.2
+
+  if(rand < correctChance){
     let ans = questions[current].a[correct]
     showMsg("🧑‍🤝‍🧑 Đứa kế bên thì thầm:\n\n\"Tao nghĩ là: <b>" + ans + "</b>\"\n(Trông tự tin 😏)\n\n+10 độ để ý 👀")
   } else if(rand < 0.8){
     let wrongArr = []
     for(let i=0; i<4; i++) if(i != correct) wrongArr.push(i)
     let wrongAns = questions[current].a[wrongArr[Math.floor(Math.random()*wrongArr.length)]]
-    showMsg("🧑‍🤝‍🧑 Đứa kế bên thì thầm:\n\n\"Tao đoán là: <b>" + wrongAns + "</b>\"\n(Trông không chắc 😅)\n\n+10 độ để ý 👀")
+    showMsg("🧑‍🤝‍🧑 Đứa kế bên thì thầm:\n\n\"Tao đoán là: <b>" + wrongAns + "</b>\"\n" + (neighborTrust ? "(Trông không chắc 😅)" : "(Nó chưa tha thứ cho bạn 😒)") + "\n\n+10 độ để ý 👀")
   } else {
     showMsg("🧑‍🤝‍🧑 Đứa kế bên thì thầm:\n\n\"Ơ tao cũng không biết 😭\nThôi tự làm đi!\"\n\n+10 độ để ý 👀")
   }
